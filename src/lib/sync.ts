@@ -238,9 +238,6 @@ export async function syncWithSupabase(params: {
     .select('*')
     .eq('user_id', userId);
 
-  if (params.lastSyncedAt) {
-    query = query.gte('updated_at', params.lastSyncedAt);
-  }
 
   const { data: remoteEntries, error: pullErr } = await query;
   if (pullErr) {
@@ -293,9 +290,7 @@ export async function syncWithSupabase(params: {
     .from('notebook_review_logs')
     .select('*')
     .eq('user_id', userId);
-  if (params.lastSyncedAt) {
-    logsQuery = logsQuery.gte('reviewed_at', params.lastSyncedAt);
-  }
+
   const { data: remoteLogs } = await logsQuery;
   if (remoteLogs && remoteLogs.length > 0) {
     const typedLogs = remoteLogs as RemoteLogRow[];
