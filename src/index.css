@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand-rgb: 23 54 93;
+  --brand-soft-rgb: 232 238 246;
+  --brand-hover-rgb: 16 38 66;
+}
+
+.dark {
+  --brand-soft-rgb: 30 58 138;
+}
+
+html,
+body {
+  font-family: 'Vazirmatn', Tahoma, Arial, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+}
+
+.pb-safe {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.dir-ltr {
+  direction: ltr;
+  text-align: left;
+  font-family: 'Inter', Arial, sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.7);
+}
