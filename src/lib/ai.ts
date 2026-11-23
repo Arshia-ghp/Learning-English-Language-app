@@ -1,5 +1,5 @@
 import { CategoryId } from '../types';
-import { CATEGORY_MAP } from '../config/categories';
+import { getCategorySafe } from '../config/categories';
 
 export interface AiEnrichmentResult {
   english: string;
@@ -194,7 +194,7 @@ async function runInstantEngine(
 }
 
 function buildPrompt(category: CategoryId, english: string, persian: string): string {
-  const cat = CATEGORY_MAP[category];
+  const cat = getCategorySafe(category);
   const hasEn = english.trim().length > 0;
   const hasFa = persian.trim().length > 0;
 
@@ -239,7 +239,7 @@ async function callOpenRouter(key: string, prompt: string): Promise<Partial<AiEn
         ]
       })
     },
-    6500
+    6000
   );
 
   if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}`);
@@ -278,12 +278,6 @@ async function callGemini(key: string, prompt: string): Promise<Partial<AiEnrich
   return parseAiJson(text);
 }
 
-/**
- * موتور ترکیبی و ضدتوقف تکمیل هوشمند:
- * - بدون کلید API: زیر ۱ ثانیه با دیکشنری + مترجم فوری پر می‌شود.
- * - با کلید OpenRouter (sk-or-...) یا Gemini (AIza...): با تایم‌اوت کوتاه اجرا شده
- *   و در صورت شلوغی سرور یا قطعی فیلترشکن، خودکار نتیجه فوری دیکشنری و مترجم را برمی‌گرداند.
- */
 export async function enrichWithGemini(params: {
   apiKey: string;
   category: CategoryId;
@@ -301,11 +295,8 @@ export async function enrichWithGemini(params: {
   }
 
   const key = params.apiKey.trim() || (import.meta.env.VITE_GEMINI_API_KEY || '').trim();
-
-  // اجرای هم‌زمان موتور فوری (دیکشنری + مترجم بدون فیلترشکن) در پس‌زمینه
   const instantPromise = runInstantEngine(enInput, faInput);
 
-  // اگر کلیدی وارد نشده باشد، بلافاصله در زیر ۱ ثانیه نتیجه موتور فوری برمی‌گردد
   if (!key) {
     const instant = await instantPromise;
     if (!instant) {
@@ -314,7 +305,6 @@ export async function enrichWithGemini(params: {
     return instant;
   }
 
-  // اگر کلید وجود داشت، مدل هوش مصنوعی با تایم‌اوت کوتاه اجرا می‌شود
   const prompt = buildPrompt(params.category, enInput, faInput);
   try {
     const aiRaw = key.startsWith('sk-or-')
@@ -330,8 +320,6 @@ export async function enrichWithGemini(params: {
       notes: String(aiRaw.notes || instant?.notes || '').trim()
     };
   } catch {
-    // در صورت شلوغی سرور (503)، تایم‌اوت یا خاموش بودن فیلترشکن:
-    // بدون نمایش خطا و معطلی، بلافاصله نتیجه آماده موتور فوری را برمی‌گرداند
     const instant = await instantPromise;
     if (instant) {
       return instant;

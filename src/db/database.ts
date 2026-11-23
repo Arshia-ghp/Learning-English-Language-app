@@ -3,6 +3,8 @@ import { CategoryId, NotebookEntry, Rating, ReviewLog } from '../types';
 import { getLocalDayKey } from '../lib/jalali';
 import { scheduleCard } from '../lib/fsrs';
 
+const MIRROR_ENTRIES_KEY = 'lexiflow_mirror_entries_v2';
+
 class LexiFlowDB extends Dexie {
   entries!: Table<NotebookEntry, string>;
   reviewLogs!: Table<ReviewLog, string>;
@@ -18,6 +20,36 @@ class LexiFlowDB extends Dexie {
 
 export const db = new LexiFlowDB();
 
+/**
+ * لایه محافظتی اضطراری روی localStorage:
+ * اگر مرورگر موبایل زمانی کش IndexedDB را خالی کرد، داده‌ها خودکار از این آینه بازیابی می‌شوند.
+ */
+export async function persistEmergencyMirror(): Promise<void> {
+  try {
+    const all = await db.entries.toArray();
+    if (all.length > 0 && all.length <= 2500) {
+      localStorage.setItem(MIRROR_ENTRIES_KEY, JSON.stringify(all));
+    }
+  } catch {
+    // نادیده گرفتن محدودیت ظرفیت localStorage
+  }
+}
+
+export async function healDatabaseFromMirrorIfEmpty(): Promise<number> {
+  try {
+    const count = await db.entries.count();
+    if (count > 0) return 0;
+    const raw = localStorage.getItem(MIRROR_ENTRIES_KEY);
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw) as NotebookEntry[];
+    if (!Array.isArray(parsed) || parsed.length === 0) return 0;
+    await db.entries.bulkPut(parsed);
+    return parsed.length;
+  } catch {
+    return 0;
+  }
+}
+
 export function generateId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -32,11 +64,11 @@ export function generateId(): string {
 }
 
 export function normalizeEnglish(text: string): string {
-  return text.trim().toLowerCase().replace(/\s+/g, ' ');
+  return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 export function normalizeSearch(text: string): string {
-  return text
+  return String(text || '')
     .replace(/ي/g, 'ی')
     .replace(/ك/g, 'ک')
     .trim()
@@ -72,13 +104,14 @@ export async function saveLocalEntry(input: SaveEntryInput): Promise<NotebookEnt
         meta: input.meta.trim(),
         example: input.example.trim(),
         notes: input.notes.trim(),
-        tags: input.tags ?? existing.tags,
-        favorite: input.favorite ?? existing.favorite,
+        tags: input.tags ?? existing.tags ?? [],
+        favorite: input.favorite ?? Boolean(existing.favorite),
         updatedAt: nowIso,
         deletedAt: null,
         syncStatus: 'pending'
       };
       await db.entries.put(updated);
+      void persistEmergencyMirror();
       return updated;
     }
   }
@@ -95,7 +128,6 @@ export async function saveLocalEntry(input: SaveEntryInput): Promise<NotebookEnt
     tags: input.tags ?? [],
     favorite: Boolean(input.favorite),
 
-    // New FSRS card (due immediately for first review or tomorrow if user prefers)
     state: 0,
     stability: 0,
     difficulty: 0,
@@ -113,6 +145,7 @@ export async function saveLocalEntry(input: SaveEntryInput): Promise<NotebookEnt
   };
 
   await db.entries.put(created);
+  void persistEmergencyMirror();
   return created;
 }
 
@@ -124,6 +157,7 @@ export async function toggleFavoriteEntry(id: string): Promise<void> {
     updatedAt: new Date().toISOString(),
     syncStatus: 'pending'
   });
+  void persistEmergencyMirror();
 }
 
 export async function softDeleteEntry(id: string): Promise<void> {
@@ -133,6 +167,7 @@ export async function softDeleteEntry(id: string): Promise<void> {
     updatedAt: nowIso,
     syncStatus: 'pending'
   });
+  void persistEmergencyMirror();
 }
 
 export async function submitCardReview(
@@ -147,7 +182,15 @@ export async function submitCardReview(
 
   const updated: NotebookEntry = {
     ...entry,
-    ...nextFsrs,
+    state: nextFsrs.state,
+    stability: nextFsrs.stability,
+    difficulty: nextFsrs.difficulty,
+    reps: nextFsrs.reps,
+    lapses: nextFsrs.lapses,
+    elapsedDays: nextFsrs.elapsedDays,
+    scheduledDays: nextFsrs.scheduledDays,
+    lastReview: nextFsrs.lastReview,
+    due: nextFsrs.due,
     updatedAt: now.toISOString(),
     syncStatus: 'pending'
   };
@@ -166,6 +209,7 @@ export async function submitCardReview(
     await db.reviewLogs.put(log);
   });
 
+  void persistEmergencyMirror();
   return updated;
 }
 
@@ -176,7 +220,7 @@ export async function findDuplicateEntries(
   const norm = normalizeEnglish(englishText);
   if (norm.length < 2) return [];
 
-  const all = await db.entries.filter((e) => e.deletedAt === null).toArray();
+  const all = await db.entries.filter((e) => !e.deletedAt).toArray();
   return all
     .filter((e) => e.id !== excludeId && normalizeEnglish(e.english) === norm)
     .slice(0, 3);

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { User } from '@supabase/supabase-js';
-import { db } from './db/database';
+import { db, healDatabaseFromMirrorIfEmpty } from './db/database';
 import { NotebookEntry, TabId, ToastMessage } from './types';
 import { useSettings } from './hooks/useSettings';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { isEntryDue } from './lib/fsrs';
 import { getCloudUser, syncWithSupabase } from './lib/sync';
+import { syncWithGoogleSheets } from './lib/sheetsSync';
 import { Navigation } from './components/Navigation';
 import { Toast } from './components/Toast';
 import { AddEditView } from './components/AddEditView';
@@ -34,13 +35,17 @@ export default function App() {
   const notify = useCallback((type: 'ok' | 'err' | 'info', text: string) => {
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     setToast({ id: Date.now(), type, text });
-    toastTimerRef.current = window.setTimeout(() => setToast(null), 3500);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 4000);
   }, []);
 
-  // کوئری‌های زنده و ۰ میلی‌ثانیه‌ای از IndexedDB
+  // خودترمیمی اضطراری حافظه محلی در صورت پاک شدن تصادفی IndexedDB توسط مرورگر موبایل
+  useEffect(() => {
+    void healDatabaseFromMirrorIfEmpty();
+  }, []);
+
   const allActiveEntries =
     useLiveQuery(
-      () => db.entries.filter((e) => e.deletedAt === null).toArray(),
+      () => db.entries.filter((e) => !e.deletedAt).toArray(),
       [],
       [] as NotebookEntry[]
     ) || [];
@@ -67,9 +72,13 @@ export default function App() {
     return allActiveEntries.filter((e) => isEntryDue(e, nowMs)).length;
   }, [allActiveEntries]);
 
-  // بررسی وضعیت نشست ابری Supabase
+  // بررسی نشست محلی Supabase (۰ میلی‌ثانیه بدون درخواست شبکه)
   useEffect(() => {
     let active = true;
+    if (settings.syncProvider !== 'supabase') {
+      setCloudUser(null);
+      return;
+    }
     void getCloudUser(settings.supabaseUrl, settings.supabaseAnonKey)
       .then((u) => {
         if (active) setCloudUser(u);
@@ -80,50 +89,74 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [settings.supabaseUrl, settings.supabaseAnonKey]);
+  }, [settings.syncProvider, settings.supabaseUrl, settings.supabaseAnonKey]);
+
+  const sheetsConnected =
+    settings.syncProvider === 'sheets' &&
+    settings.sheetsWebAppUrl.trim().startsWith('https://script.google.com/') &&
+    settings.sheetsSecretPin.trim().length > 0;
+
+  const cloudConnected =
+    sheetsConnected || (settings.syncProvider === 'supabase' && Boolean(cloudUser));
 
   const runSync = useCallback(
     async (silent = false) => {
-      if (syncingRef.current || !online || !cloudUser) return;
+      if (syncingRef.current || !online || !cloudConnected) return;
       syncingRef.current = true;
       setSyncing(true);
       try {
         const cur = settingsRef.current;
-        const report = await syncWithSupabase({
-          supabaseUrl: cur.supabaseUrl,
-          supabaseAnonKey: cur.supabaseAnonKey,
-          lastSyncedAt: cur.lastSyncedAt
-        });
+        const report =
+          cur.syncProvider === 'sheets'
+            ? await syncWithGoogleSheets({
+                webAppUrl: cur.sheetsWebAppUrl,
+                secretPin: cur.sheetsSecretPin
+              })
+            : await syncWithSupabase({
+                supabaseUrl: cur.supabaseUrl,
+                supabaseAnonKey: cur.supabaseAnonKey
+              });
+
         updateSettings({ lastSyncedAt: report.syncedAt });
         if (!silent) {
-          notify('ok', 'همگام‌سازی ابری با موفقیت انجام شد.');
+          notify('ok', 'همگام‌سازی با موفقیت انجام شد.');
         }
       } catch (err) {
         if (!silent) {
-          notify('err', err instanceof Error ? err.message : 'خطا در همگام‌سازی ابری');
+          notify('err', err instanceof Error ? err.message : 'خطا در همگام‌سازی');
         }
       } finally {
         syncingRef.current = false;
         setSyncing(false);
       }
     },
-    [online, cloudUser, updateSettings, notify]
+    [online, cloudConnected, updateSettings, notify]
   );
 
-  // همگام‌سازی خودکار هنگام وصل شدن اینترنت یا ورود کاربر
+  // همگام‌سازی خودکار هنگام باز کردن برنامه و هنگام بازگشت از پس‌زمینه گوشی
   useEffect(() => {
-    if (online && cloudUser) {
+    if (online && cloudConnected) {
       void runSync(true);
     }
-  }, [online, cloudUser, runSync]);
+  }, [online, cloudConnected, runSync]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && online && cloudConnected) {
+        void runSync(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [online, cloudConnected, runSync]);
 
   const scheduleBackgroundSync = useCallback(() => {
-    if (!online || !cloudUser) return;
+    if (!online || !cloudConnected) return;
     if (autoSyncTimerRef.current) window.clearTimeout(autoSyncTimerRef.current);
     autoSyncTimerRef.current = window.setTimeout(() => {
       void runSync(true);
-    }, 2500);
-  }, [online, cloudUser, runSync]);
+    }, 2000);
+  }, [online, cloudConnected, runSync]);
 
   const handleStartEdit = (entry: NotebookEntry) => {
     setEditingEntry(entry);
@@ -142,7 +175,7 @@ export default function App() {
         onToggleDark={() => updateSettings({ darkMode: !settings.darkMode })}
         accent={settings.accent}
         onChangeAccent={(acc) => updateSettings({ accent: acc })}
-        cloudConnected={Boolean(cloudUser)}
+        cloudConnected={cloudConnected}
         syncing={syncing}
         onSyncNow={() => void runSync(false)}
       />
@@ -179,6 +212,7 @@ export default function App() {
               entries={allActiveEntries}
               sessions={sessions}
               settings={settings}
+              onNotify={notify}
               onDataMutated={scheduleBackgroundSync}
             />
           )}

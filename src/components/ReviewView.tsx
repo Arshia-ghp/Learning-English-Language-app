@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Volume2, RotateCcw, Brain, Sparkles, CheckCircle2 } from 'lucide-react';
 import {
   AppSettings,
@@ -7,7 +7,7 @@ import {
   Rating,
   ReviewStudyMode
 } from '../types';
-import { CATEGORIES, CATEGORY_MAP } from '../config/categories';
+import { CATEGORIES, getCategorySafe } from '../config/categories';
 import { submitCardReview } from '../db/database';
 import { isEntryDue, previewCardRatings } from '../lib/fsrs';
 import { playPronunciation } from '../lib/audio';
@@ -17,6 +17,7 @@ interface ReviewViewProps {
   entries: NotebookEntry[];
   sessions: string[];
   settings: AppSettings;
+  onNotify: (type: 'ok' | 'err' | 'info', text: string) => void;
   onDataMutated: () => void;
 }
 
@@ -24,12 +25,11 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function buildClozeSentence(example: string, target: string): string | null {
-  const ex = example.trim();
-  const tgt = target.trim();
+function buildClozeSentence(example?: string, target?: string): string | null {
+  const ex = String(example || '').trim();
+  const tgt = String(target || '').trim();
   if (!ex || !tgt) return null;
 
-  // حذف فونتیک داخل پرانتز از هدف در صورت وجود
   const cleanTarget = tgt.replace(/\([^)]*\)/g, '').trim();
   if (cleanTarget.length < 2) return null;
 
@@ -38,8 +38,7 @@ function buildClozeSentence(example: string, target: string): string | null {
     return ex.replace(exactRegex, '________');
   }
 
-  // تلاش برای تطبیق ریشه کلمه (مثلاً achieve -> achieved / achieving)
-  const firstWord = cleanTarget.split(/\s+/)[0];
+  const firstWord = cleanTarget.split(/\s+/)[0] || '';
   if (firstWord.length >= 4) {
     const stem = firstWord.slice(0, Math.max(4, firstWord.length - 2));
     const stemRegex = new RegExp(`\\b${escapeRegExp(stem)}[a-zA-Z'-]*\\b`, 'i');
@@ -55,6 +54,7 @@ export function ReviewView({
   entries,
   sessions,
   settings,
+  onNotify,
   onDataMutated
 }: ReviewViewProps) {
   const [scope, setScope] = useState<'due' | 'practice'>('due');
@@ -85,13 +85,21 @@ export function ReviewView({
 
   const ratingPreviews = useMemo(() => {
     if (!currentCard) return null;
-    return previewCardRatings(currentCard);
+    try {
+      return previewCardRatings(currentCard);
+    } catch {
+      return { 1: '۵ دقیقه', 2: '۱ روز', 3: '۳ روز', 4: '۵ روز' };
+    }
   }, [currentCard]);
 
   const startSession = () => {
     const list = [...candidateCards];
     if (scope === 'due') {
-      list.sort((a, b) => new Date(a.due).getTime() - new Date(b.due).getTime());
+      list.sort((a, b) => {
+        const ta = new Date(a.due).getTime();
+        const tb = new Date(b.due).getTime();
+        return (Number.isFinite(ta) ? ta : 0) - (Number.isFinite(tb) ? tb : 0);
+      });
     } else {
       for (let i = list.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -103,35 +111,44 @@ export function ReviewView({
     setInitialTotal(capped.length);
     setCompletedCount(0);
     setFlipped(false);
+    setBusy(false);
     setSessionActive(true);
   };
 
-  const handleRate = async (rating: Rating) => {
-    if (!currentCard || busy) return;
-    setBusy(true);
-    try {
-      const updated = await submitCardReview(currentCard.id, rating);
-      onDataMutated();
+  const handleRate = useCallback(
+    async (rating: Rating) => {
+      if (!currentCard || busy) return;
+      setBusy(true);
+      try {
+        const updated = await submitCardReview(currentCard.id, rating);
+        onDataMutated();
 
-      setQueue((prev) => {
-        const rest = prev.slice(1);
-        // اگر کاربر «دوباره» زد، کارت را بعد از ۲ کارت مجدداً در همین جلسه تمرین کن
         if (rating === 1 && updated) {
-          const insertAt = Math.min(2, rest.length);
-          const nextQueue = [...rest];
-          nextQueue.splice(insertAt, 0, updated);
-          return nextQueue;
+          setQueue((prev) => {
+            const rest = prev.slice(1);
+            const insertAt = Math.min(2, rest.length);
+            const nextQueue = [...rest];
+            nextQueue.splice(insertAt, 0, updated);
+            return nextQueue;
+          });
+        } else {
+          setQueue((prev) => prev.slice(1));
+          setCompletedCount((c) => c + 1);
         }
-        setCompletedCount((c) => c + 1);
-        return rest;
-      });
-      setFlipped(false);
-    } finally {
-      setBusy(false);
-    }
-  };
+        setFlipped(false);
+      } catch (err) {
+        console.error('Review submit error:', err);
+        onNotify(
+          'err',
+          err instanceof Error ? err.message : 'خطا در ثبت نتیجه مرور؛ دوباره تلاش کن.'
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [currentCard, busy, onDataMutated, onNotify]
+  );
 
-  // میانبر کیبورد در دسکتاپ: Space برای برگرداندن، کلیدهای 1..4 برای امتیازدهی
   useEffect(() => {
     if (!sessionActive || !currentCard) return;
     const onKey = (e: KeyboardEvent) => {
@@ -148,7 +165,7 @@ export function ReviewView({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  });
+  }, [sessionActive, currentCard, flipped, handleRate]);
 
   if (!sessionActive) {
     return (
@@ -168,7 +185,6 @@ export function ReviewView({
             </div>
           </div>
 
-          {/* انتخاب شیوه نمایش کارت */}
           <div>
             <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">
               شیوه تمرین کارت‌ها
@@ -214,7 +230,6 @@ export function ReviewView({
             </div>
           </div>
 
-          {/* فیلترهای دسته مرور */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <div>
               <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
@@ -294,7 +309,6 @@ export function ReviewView({
     );
   }
 
-  // پایان جلسه
   if (!currentCard) {
     return (
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-8 text-center shadow-sm space-y-4">
@@ -320,7 +334,7 @@ export function ReviewView({
     );
   }
 
-  const cat = CATEGORY_MAP[currentCard.category];
+  const cat = getCategorySafe(currentCard.category);
   const clozeText =
     studyMode === 'cloze'
       ? buildClozeSentence(currentCard.example, currentCard.english)
@@ -330,7 +344,6 @@ export function ReviewView({
 
   return (
     <div className="space-y-4">
-      {/* نوار پیشرفت جلسه */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-3.5 shadow-sm">
         <div className="flex items-center justify-between text-xs mb-2">
           <span className="font-bold text-slate-700 dark:text-slate-200">
@@ -353,12 +366,10 @@ export function ReviewView({
         </div>
       </div>
 
-      {/* فلش‌کارت تعاملی */}
       <div
         onClick={() => setFlipped((v) => !v)}
-        className="min-h-[280px] bg-white dark:bg-slate-900 rounded-3xl border-2 border-slate-200 dark:border-slate-700 p-6 shadow-md flex flex-col justify-between cursor-pointer select-none transition hover:border-brand/50"
+        className="min-h-[260px] bg-white dark:bg-slate-900 rounded-3xl border-2 border-slate-200 dark:border-slate-700 p-5 sm:p-6 shadow-md flex flex-col justify-between cursor-pointer select-none transition hover:border-brand/50"
       >
-        {/* تگ‌های بالای کارت */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <span
             className="text-xs font-bold px-3 py-1 rounded-full"
@@ -374,8 +385,7 @@ export function ReviewView({
           )}
         </div>
 
-        {/* روی کارت (سؤال) */}
-        <div className="my-6 text-center space-y-3">
+        <div className="my-5 text-center space-y-3">
           {studyMode === 'reverse' ? (
             <>
               <div className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white leading-relaxed">
@@ -420,7 +430,6 @@ export function ReviewView({
           )}
         </div>
 
-        {/* پشت کارت (پاسخ) */}
         {flipped ? (
           <div className="pt-4 border-t border-dashed border-slate-200 dark:border-slate-700 space-y-2.5 text-right">
             {studyMode !== 'standard' && (
@@ -481,7 +490,6 @@ export function ReviewView({
         )}
       </div>
 
-      {/* دکمه‌های امتیازدهی FSRS-5 */}
       {flipped && ratingPreviews && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <button

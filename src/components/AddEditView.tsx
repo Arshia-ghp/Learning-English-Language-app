@@ -12,7 +12,7 @@ import {
   Check
 } from 'lucide-react';
 import { AppSettings, CategoryId, NotebookEntry } from '../types';
-import { CATEGORIES, CATEGORY_MAP } from '../config/categories';
+import { CATEGORIES, getCategorySafe } from '../config/categories';
 import {
   findDuplicateEntries,
   saveLocalEntry,
@@ -131,7 +131,7 @@ export function AddEditView({
     return () => window.removeEventListener('keydown', handler);
   });
 
-  const activeCat = CATEGORY_MAP[category];
+  const activeCat = getCategorySafe(category);
 
   const resetForm = (preserveSession: boolean) => {
     if (!preserveSession) {
@@ -415,7 +415,7 @@ export function AddEditView({
               </div>
               {duplicates.map((d) => (
                 <div key={d.id} className="pr-5">
-                  • در «{CATEGORY_MAP[d.category].label}»: <b className="dir-ltr">{d.english}</b> —{' '}
+                  • در «{getCategorySafe(d.category).label}»: <b className="dir-ltr">{d.english}</b> —{' '}
                   {d.persian}
                 </div>
               ))}
@@ -561,7 +561,7 @@ export function AddEditView({
         ) : (
           <div className="space-y-2.5">
             {recentEntries.map((item) => {
-              const cat = CATEGORY_MAP[item.category];
+              const cat = getCategorySafe(item.category);
               const badge = getMasteryBadge(item);
               return (
                 <div

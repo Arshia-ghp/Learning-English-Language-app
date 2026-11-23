@@ -9,6 +9,7 @@ export type CategoryId =
 export type FsrsState = 0 | 1 | 2 | 3; // 0: New, 1: Learning, 2: Review, 3: Relearning
 export type Rating = 1 | 2 | 3 | 4; // 1: Again, 2: Hard, 3: Good, 4: Easy
 export type SyncStatus = 'pending' | 'synced';
+export type SyncProvider = 'none' | 'sheets' | 'supabase';
 export type Accent = 'en-US' | 'en-GB';
 export type ThemeId = 'navy' | 'emerald' | 'royal' | 'crimson';
 export type TabId = 'add' | 'library' | 'review' | 'stats' | 'settings';
@@ -75,6 +76,9 @@ export interface AppSettings {
   accent: Accent;
   keepSession: boolean;
   lastSession: string;
+  syncProvider: SyncProvider;
+  sheetsWebAppUrl: string;
+  sheetsSecretPin: string;
   supabaseUrl: string;
   supabaseAnonKey: string;
   geminiApiKey: string;

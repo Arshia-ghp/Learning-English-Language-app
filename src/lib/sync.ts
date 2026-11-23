@@ -1,9 +1,50 @@
 import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
-import { db } from '../db/database';
-import { CategoryId, FsrsState, NotebookEntry, Rating, ReviewLog } from '../types';
+import { db, persistEmergencyMirror } from '../db/database';
+import { getCategorySafe } from '../config/categories';
+import { FsrsState, NotebookEntry, Rating, ReviewLog } from '../types';
 
 let cachedClient: SupabaseClient | null = null;
 let cachedKey = '';
+
+const SUPABASE_TIMEOUT_MS = 10000;
+
+/**
+ * لایه fetch با تایم‌اوت سخت‌گیرانه ۱۰ ثانیه‌ای:
+ * جلوگیری قطعی از گیر کردن همیشگی روی «در حال همگام‌سازی» هنگام نبود فیلترشکن یا اختلال شبکه.
+ */
+async function timedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), SUPABASE_TIMEOUT_MS);
+
+  const externalSignal = init?.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(
+        'اتصال به سرور Supabase برقرار نشد (تایم‌اوت ۱۰ ثانیه). اگر بدون فیلترشکن هستی، از همگام‌سازی مستقیم با گوگل شیت استفاده کن.'
+      );
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
 
 export function resolveSupabaseConfig(
   settingsUrl?: string,
@@ -30,20 +71,30 @@ export function getSupabaseClient(
     auth: {
       persistSession: true,
       autoRefreshToken: true
+    },
+    global: {
+      fetch: timedFetch
     }
   });
   cachedKey = signature;
   return cachedClient;
 }
 
+/**
+ * خواندن نشست کاربر از حافظه محلی (بدون درخواست شبکه — ۰ میلی‌ثانیه و بدون نیاز به فیلترشکن)
+ */
 export async function getCloudUser(
   settingsUrl?: string,
   settingsKey?: string
 ): Promise<User | null> {
   const client = getSupabaseClient(settingsUrl, settingsKey);
   if (!client) return null;
-  const { data } = await client.auth.getUser();
-  return data.user ?? null;
+  try {
+    const { data } = await client.auth.getSession();
+    return data.session?.user ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function cloudSignIn(
@@ -87,7 +138,8 @@ export async function cloudSignOut(
 ): Promise<void> {
   const client = getSupabaseClient(settingsUrl, settingsKey);
   if (!client) return;
-  await client.auth.signOut();
+  // خروج محلی آنی تا در نبود فیلترشکن یا اینترنت هرگز هنگ نکند
+  await client.auth.signOut({ scope: 'local' });
 }
 
 interface RemoteEntryRow {
@@ -134,7 +186,6 @@ export interface SyncReport {
 export async function syncWithSupabase(params: {
   supabaseUrl?: string;
   supabaseAnonKey?: string;
-  lastSyncedAt: string | null;
 }): Promise<SyncReport> {
   if (!navigator.onLine) {
     throw new Error('اتصال اینترنت برقرار نیست. تغییرات به‌صورت آفلاین امن هستند.');
@@ -145,16 +196,17 @@ export async function syncWithSupabase(params: {
     throw new Error('تنظیمات Supabase وارد نشده است.');
   }
 
-  const { data: userData, error: authErr } = await client.auth.getUser();
-  if (authErr || !userData.user) {
+  const { data: sessionData, error: authErr } = await client.auth.getSession();
+  const user = sessionData.session?.user;
+  if (authErr || !user) {
     throw new Error('ابتدا در بخش تنظیمات وارد حساب ابری خود شوید.');
   }
 
-  const userId = userData.user.id;
+  const userId = user.id;
   let pushed = 0;
   let pulled = 0;
 
-  // 1) PUSH: ارسال یادداشت‌های در انتظار سینک به Supabase
+  // 1) PUSH
   const pendingEntries = await db.entries
     .where('syncStatus')
     .equals('pending')
@@ -203,7 +255,6 @@ export async function syncWithSupabase(params: {
     pushed += pendingEntries.length;
   }
 
-  // ارسال لاگ‌های مرور
   const pendingLogs = await db.reviewLogs
     .where('syncStatus')
     .equals('pending')
@@ -232,14 +283,12 @@ export async function syncWithSupabase(params: {
     }
   }
 
-  // 2) PULL: دریافت تغییرات جدیدتر از سرور (Last-Write-Wins)
-  let query = client
+  // 2) FULL PULL (بدون فیلتر lastSyncedAt تا هیچ یادداشت آفلاینی جا نماند)
+  const { data: remoteEntries, error: pullErr } = await client
     .from('notebook_entries')
     .select('*')
     .eq('user_id', userId);
 
-
-  const { data: remoteEntries, error: pullErr } = await query;
   if (pullErr) {
     throw new Error('خطا در دریافت یادداشت‌ها از سرور: ' + pullErr.message);
   }
@@ -252,10 +301,11 @@ export async function syncWithSupabase(params: {
         const remoteUpdated = new Date(r.updated_at).getTime();
         const localUpdated = local ? new Date(local.updatedAt).getTime() : 0;
 
-        if (!local || remoteUpdated > localUpdated) {
+        if (!local || (Number.isFinite(remoteUpdated) && remoteUpdated > (Number.isFinite(localUpdated) ? localUpdated : 0))) {
+          const cat = getCategorySafe(r.category);
           const merged: NotebookEntry = {
             id: r.id,
-            category: r.category as CategoryId,
+            category: cat.id,
             session: r.session || '',
             english: r.english || '',
             persian: r.persian || '',
@@ -264,18 +314,18 @@ export async function syncWithSupabase(params: {
             notes: r.notes || '',
             tags: Array.isArray(r.tags) ? r.tags : [],
             favorite: Boolean(r.favorite),
-            state: (r.state as FsrsState) ?? 0,
-            stability: Number(r.stability) || 0,
-            difficulty: Number(r.difficulty) || 0,
-            reps: Number(r.reps) || 0,
-            lapses: Number(r.lapses) || 0,
-            elapsedDays: Number(r.elapsed_days) || 0,
-            scheduledDays: Number(r.scheduled_days) || 0,
+            state: ([0, 1, 2, 3].includes(Number(r.state)) ? Number(r.state) : 0) as FsrsState,
+            stability: Number.isFinite(Number(r.stability)) ? Number(r.stability) : 0,
+            difficulty: Number.isFinite(Number(r.difficulty)) ? Number(r.difficulty) : 0,
+            reps: Number.isFinite(Number(r.reps)) ? Number(r.reps) : 0,
+            lapses: Number.isFinite(Number(r.lapses)) ? Number(r.lapses) : 0,
+            elapsedDays: Number.isFinite(Number(r.elapsed_days)) ? Number(r.elapsed_days) : 0,
+            scheduledDays: Number.isFinite(Number(r.scheduled_days)) ? Number(r.scheduled_days) : 0,
             lastReview: r.last_review,
             due: r.due || new Date().toISOString(),
             createdAt: r.created_at || new Date().toISOString(),
             updatedAt: r.updated_at || new Date().toISOString(),
-            deletedAt: r.deleted_at,
+            deletedAt: r.deleted_at || null,
             syncStatus: 'synced'
           };
           await db.entries.put(merged);
@@ -285,13 +335,11 @@ export async function syncWithSupabase(params: {
     });
   }
 
-  // دریافت لاگ‌های مرور جدید از سرور
-  let logsQuery = client
+  const { data: remoteLogs } = await client
     .from('notebook_review_logs')
     .select('*')
     .eq('user_id', userId);
 
-  const { data: remoteLogs } = await logsQuery;
   if (remoteLogs && remoteLogs.length > 0) {
     const typedLogs = remoteLogs as RemoteLogRow[];
     await db.transaction('rw', db.reviewLogs, async () => {
@@ -301,7 +349,7 @@ export async function syncWithSupabase(params: {
           const localLog: ReviewLog = {
             id: rl.id,
             entryId: rl.entry_id,
-            rating: rl.rating as Rating,
+            rating: ([1, 2, 3, 4].includes(Number(rl.rating)) ? Number(rl.rating) : 3) as Rating,
             reviewedAt: rl.reviewed_at,
             dayKey: rl.day_key,
             syncStatus: 'synced'
@@ -311,6 +359,8 @@ export async function syncWithSupabase(params: {
       }
     });
   }
+
+  await persistEmergencyMirror();
 
   return {
     pushed,

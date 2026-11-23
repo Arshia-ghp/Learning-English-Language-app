@@ -140,3 +140,11 @@ export const THEMES: Record<
     hoverRgb: '136 19 55'
   }
 };
+
+
+export function getCategorySafe(id: unknown): CategoryConfig {
+  if (typeof id === 'string' && id in CATEGORY_MAP) {
+    return CATEGORY_MAP[id as CategoryId];
+  }
+  return CATEGORIES[0];
+}

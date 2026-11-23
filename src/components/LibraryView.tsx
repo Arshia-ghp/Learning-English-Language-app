@@ -10,7 +10,7 @@ import {
   Clock
 } from 'lucide-react';
 import { AppSettings, CategoryId, NotebookEntry } from '../types';
-import { CATEGORIES, CATEGORY_MAP } from '../config/categories';
+import { CATEGORIES, getCategorySafe } from '../config/categories';
 import { normalizeSearch, softDeleteEntry, toggleFavoriteEntry } from '../db/database';
 import { playPronunciation } from '../lib/audio';
 import { formatJalaliDate, formatRelativeDueFa, toFaDigits } from '../lib/jalali';
@@ -198,7 +198,7 @@ export function LibraryView({
       ) : (
         <div className="space-y-2.5">
           {filtered.map((item) => {
-            const cat = CATEGORY_MAP[item.category];
+            const cat = getCategorySafe(item.category);
             const badge = getMasteryBadge(item);
             const dueNow = isEntryDue(item);
 

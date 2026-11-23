@@ -10,6 +10,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   accent: 'en-US',
   keepSession: true,
   lastSession: '',
+  syncProvider: 'sheets',
+  sheetsWebAppUrl: '',
+  sheetsSecretPin: '',
   supabaseUrl: '',
   supabaseAnonKey: '',
   geminiApiKey: '',
@@ -21,10 +24,15 @@ function loadInitialSettings(): AppSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return {
+    const merged: AppSettings = {
       ...DEFAULT_SETTINGS,
       ...parsed
     };
+    // اگر کاربر قبلاً Supabase تنظیم کرده و هنوز گوگل شیت ست نکرده، همان را حفظ کن
+    if (!parsed.syncProvider && parsed.supabaseUrl && parsed.supabaseAnonKey && !parsed.sheetsWebAppUrl) {
+      merged.syncProvider = 'supabase';
+    }
+    return merged;
   } catch {
     return DEFAULT_SETTINGS;
   }

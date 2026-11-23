@@ -11,12 +11,14 @@ import {
   EyeOff,
   FileSpreadsheet,
   Database,
-  KeyRound
+  KeyRound,
+  ShieldCheck
 } from 'lucide-react';
 import { User } from '@supabase/supabase-js';
-import { AppSettings, CategoryId, ThemeId } from '../types';
+import { AppSettings, CategoryId, SyncProvider, ThemeId } from '../types';
 import { CATEGORIES, THEMES } from '../config/categories';
 import { cloudSignIn, cloudSignOut, cloudSignUp, resolveSupabaseConfig } from '../lib/sync';
+import { markAllLocalPending } from '../lib/sheetsSync';
 import {
   exportAnkiCsv,
   exportJsonBackup,
@@ -52,13 +54,18 @@ export function SettingsView({
   const [password, setPassword] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [showSheetPin, setShowSheetPin] = useState(false);
   const [csvTargetCategory, setCsvTargetCategory] = useState<CategoryId>('word');
 
   const jsonInputRef = useRef<HTMLInputElement | null>(null);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   const resolvedCloud = resolveSupabaseConfig(settings.supabaseUrl, settings.supabaseAnonKey);
-  const hasCloudConfig = Boolean(resolvedCloud.url && resolvedCloud.anonKey);
+  const hasSupabaseConfig = Boolean(resolvedCloud.url && resolvedCloud.anonKey);
+  const hasSheetsConfig = Boolean(
+    settings.sheetsWebAppUrl.trim().startsWith('https://script.google.com/') &&
+      settings.sheetsSecretPin.trim()
+  );
 
   const handleAuth = async (mode: 'signin' | 'signup') => {
     if (!email.trim() || password.length < 6) {
@@ -75,7 +82,7 @@ export function SettingsView({
           settings.supabaseAnonKey
         );
         onCloudUserChange(user);
-        onNotify('ok', 'ورود با موفقیت انجام شد! اکنون همگام‌سازی ابری فعال است.');
+        onNotify('ok', 'ورود با موفقیت انجام شد!');
         onSyncNow();
       } else {
         const res = await cloudSignUp(
@@ -104,7 +111,13 @@ export function SettingsView({
     await cloudSignOut(settings.supabaseUrl, settings.supabaseAnonKey);
     onCloudUserChange(null);
     onUpdateSettings({ lastSyncedAt: null });
-    onNotify('info', 'از حساب ابری خارج شدی. داده‌های محلی همچنان روی دستگاه محفوظ‌اند.');
+    onNotify('info', 'از حساب Supabase خارج شدی. داده‌های محلی همچنان روی دستگاه محفوظ‌اند.');
+  };
+
+  const handleForceUploadToSheets = async () => {
+    const count = await markAllLocalPending();
+    onNotify('info', `در حال ارسال ${toFaDigits(count)} یادداشت به گوگل شیت...`);
+    onSyncNow();
   };
 
   const handleImportJson = async (file: File | undefined) => {
@@ -171,139 +184,245 @@ export function SettingsView({
         </div>
       </div>
 
-      {/* همگام‌سازی ابری بین گوشی و لپ‌تاپ (Supabase) */}
+      {/* همگام‌سازی ابری بین گوشی و لپ‌تاپ */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 shadow-sm space-y-4">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Cloud className="w-5 h-5 text-brand dark:text-blue-400" />
-            <div>
-              <h2 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                همگام‌سازی ابری (گوشی ⇄ لپ‌تاپ)
-              </h2>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                اختیاری — متصل به Supabase رایگان با امنیت اختصاصی (RLS)
-              </p>
+        <div className="flex items-center gap-2">
+          <Cloud className="w-5 h-5 text-brand dark:text-blue-400" />
+          <div>
+            <h2 className="text-sm font-extrabold text-slate-900 dark:text-white">
+              همگام‌سازی گوشی ⇄ لپ‌تاپ
+            </h2>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              گوگل شیت بدون فیلترشکن روی اینترنت ایران کار می‌کند و تمام لغات را در گوگل درایو ذخیره می‌کند
+            </p>
+          </div>
+        </div>
+
+        {/* انتخاب روش همگام‌سازی */}
+        <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-100 dark:bg-slate-800">
+          {(
+            [
+              { id: 'sheets', label: 'گوگل شیت (بدون فیلترشکن ★)' },
+              { id: 'supabase', label: 'Supabase (نیاز به فیلترشکن)' }
+            ] as Array<{ id: SyncProvider; label: string }>
+          ).map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => onUpdateSettings({ syncProvider: opt.id })}
+              className={`py-2 px-2.5 rounded-lg text-xs font-bold transition ${
+                settings.syncProvider === opt.id
+                  ? 'bg-white dark:bg-slate-900 text-brand dark:text-blue-300 shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* پنل همگام‌سازی مستقیم با گوگل شیت */}
+        {settings.syncProvider === 'sheets' && (
+          <div className="space-y-3">
+            <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-[11px] text-emerald-800 dark:text-emerald-200 leading-relaxed flex items-start gap-2">
+              <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                با این روش، تمام یادداشت‌ها هم روی حافظه گوشی/لپ‌تاپ (آفلاین ۰ میلی‌ثانیه‌ای) و هم
+                مستقیماً در گوگل شیت شخصی خودت (بدون فیلترشکن) ذخیره و همگام می‌شوند.
+              </span>
             </div>
-          </div>
-        </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-          <div>
-            <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
-              Supabase Project URL
-            </label>
-            <input
-              value={settings.supabaseUrl}
-              onChange={(e) => onUpdateSettings({ supabaseUrl: e.target.value })}
-              placeholder="https://xxxxx.supabase.co"
-              className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
-              Supabase Anon Public Key
-            </label>
-            <input
-              type="password"
-              value={settings.supabaseAnonKey}
-              onChange={(e) => onUpdateSettings({ supabaseAnonKey: e.target.value })}
-              placeholder="eyJhbGciOiJIUzI1NiIs..."
-              className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-            />
-          </div>
-        </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
+                لینک Web App گوگل شیت (پایان‌یافته به /exec)
+              </label>
+              <input
+                value={settings.sheetsWebAppUrl}
+                onChange={(e) => onUpdateSettings({ sheetsWebAppUrl: e.target.value })}
+                placeholder="https://script.google.com/macros/s/AKfycb.../exec"
+                className="w-full dir-ltr px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+              />
+            </div>
 
-        {hasCloudConfig && (
-          <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
-            {cloudUser ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between flex-wrap gap-2 bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 px-3.5 py-2.5 rounded-xl text-xs">
-                  <div>
-                    <div className="font-bold text-emerald-800 dark:text-emerald-300">
-                      متصل به حساب: <span className="dir-ltr">{cloudUser.email}</span>
-                    </div>
-                    <div className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 mt-0.5">
-                      {settings.lastSyncedAt
-                        ? `آخرین همگام‌سازی: ${formatJalaliDate(settings.lastSyncedAt)} ساعت ${formatJalaliTime(settings.lastSyncedAt)}`
-                        : 'هنوز همگام‌سازی انجام نشده'}
-                      {pendingCount > 0 ? ` — ${toFaDigits(pendingCount)} تغییر در صف` : ''}
-                    </div>
-                  </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
+                رمز همگام‌سازی (SECRET_PIN)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type={showSheetPin ? 'text' : 'password'}
+                  value={settings.sheetsSecretPin}
+                  onChange={(e) => onUpdateSettings({ sheetsSecretPin: e.target.value })}
+                  placeholder="رمزی که در فایل SyncBackend.gs گذاشتی"
+                  className="flex-1 dir-ltr px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSheetPin((v) => !v)}
+                  className="px-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+                >
+                  {showSheetPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            {hasSheetsConfig && (
+              <div className="space-y-2.5 pt-1">
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {settings.lastSyncedAt
+                    ? `آخرین همگام‌سازی موفق: ${formatJalaliDate(settings.lastSyncedAt)} ساعت ${formatJalaliTime(settings.lastSyncedAt)}`
+                    : 'هنوز همگام‌سازی انجام نشده است.'}
+                  {pendingCount > 0 ? ` — ${toFaDigits(pendingCount)} مورد در صف ارسال` : ''}
                 </div>
 
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     disabled={syncing}
                     onClick={onSyncNow}
-                    className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-brand text-white text-xs font-bold disabled:opacity-50"
+                    className="flex-1 min-w-[160px] flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold disabled:opacity-50"
                   >
                     <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-                    {syncing ? 'در حال همگام‌سازی...' : 'همگام‌سازی دستی همین الان'}
+                    {syncing ? 'در حال همگام‌سازی...' : 'همگام‌سازی با گوگل شیت'}
                   </button>
+
                   <button
                     type="button"
-                    onClick={() => void handleSignOut()}
-                    className="flex items-center gap-1.5 py-2.5 px-4 rounded-xl bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-xs font-bold"
+                    disabled={syncing}
+                    onClick={() => void handleForceUploadToSheets()}
+                    className="py-2.5 px-3.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold disabled:opacity-50"
+                    title="ارسال کامل تمام لغات این دستگاه به گوگل شیت"
                   >
-                    <LogOut className="w-4 h-4" />
-                    خروج
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="ایمیل شخصی شما"
-                    className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
-                  />
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="رمز عبور (حداقل ۶ کاراکتر)"
-                    className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    disabled={authBusy}
-                    onClick={() => void handleAuth('signin')}
-                    className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-brand text-white text-xs font-bold disabled:opacity-50"
-                  >
-                    <LogIn className="w-4 h-4" />
-                    ورود به حساب
-                  </button>
-                  <button
-                    type="button"
-                    disabled={authBusy}
-                    onClick={() => void handleAuth('signup')}
-                    className="flex-1 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold disabled:opacity-50"
-                  >
-                    ساخت حساب جدید
+                    ارسال کل لغات این دستگاه
                   </button>
                 </div>
               </div>
             )}
           </div>
         )}
+
+        {/* پنل Supabase */}
+        {settings.syncProvider === 'supabase' && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
+                  Supabase Project URL
+                </label>
+                <input
+                  value={settings.supabaseUrl}
+                  onChange={(e) => onUpdateSettings({ supabaseUrl: e.target.value })}
+                  placeholder="https://xxxxx.supabase.co"
+                  className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-1">
+                  Supabase Anon Public Key
+                </label>
+                <input
+                  type="password"
+                  value={settings.supabaseAnonKey}
+                  onChange={(e) => onUpdateSettings({ supabaseAnonKey: e.target.value })}
+                  placeholder="eyJhbGciOiJIUzI1NiIs..."
+                  className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+              </div>
+            </div>
+
+            {hasSupabaseConfig && (
+              <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                {cloudUser ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2 bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 px-3.5 py-2.5 rounded-xl text-xs">
+                      <div>
+                        <div className="font-bold text-emerald-800 dark:text-emerald-300">
+                          متصل به حساب: <span className="dir-ltr">{cloudUser.email}</span>
+                        </div>
+                        <div className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 mt-0.5">
+                          {settings.lastSyncedAt
+                            ? `آخرین همگام‌سازی: ${formatJalaliDate(settings.lastSyncedAt)} ساعت ${formatJalaliTime(settings.lastSyncedAt)}`
+                            : 'هنوز همگام‌سازی انجام نشده'}
+                          {pendingCount > 0 ? ` — ${toFaDigits(pendingCount)} تغییر در صف` : ''}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        disabled={syncing}
+                        onClick={onSyncNow}
+                        className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-brand text-white text-xs font-bold disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+                        {syncing ? 'در حال همگام‌سازی...' : 'همگام‌سازی دستی همین الان'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleSignOut()}
+                        className="flex items-center gap-1.5 py-2.5 px-4 rounded-xl bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-xs font-bold"
+                      >
+                        <LogOut className="w-4 h-4" />
+                        خروج
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="ایمیل شخصی شما"
+                        className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                      />
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="رمز عبور (حداقل ۶ کاراکتر)"
+                        className="w-full dir-ltr px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        disabled={authBusy}
+                        onClick={() => void handleAuth('signin')}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-brand text-white text-xs font-bold disabled:opacity-50"
+                      >
+                        <LogIn className="w-4 h-4" />
+                        ورود به حساب
+                      </button>
+                      <button
+                        type="button"
+                        disabled={authBusy}
+                        onClick={() => void handleAuth('signup')}
+                        className="flex-1 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold disabled:opacity-50"
+                      >
+                        ساخت حساب جدید
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* تنظیمات هوش مصنوعی Gemini */}
+      {/* تنظیمات تکمیل هوشمند AI */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 shadow-sm space-y-3">
         <div className="flex items-center gap-2">
           <Sparkles className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
           <div>
             <h2 className="text-sm font-extrabold text-slate-900 dark:text-white">
-              تکمیل هوشمند با هوش مصنوعی (Gemini Flash)
+              تکمیل هوشمند (فوری بدون کلید + پشتیبانی OpenRouter / Gemini)
             </h2>
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              کلید رایگان از Google AI Studio — فقط روی دستگاه خودت ذخیره می‌شود
+              اگر خالی بگذاری زیر ۱ ثانیه با دیکشنری و مترجم فوری (بدون فیلترشکن) کار می‌کند
             </p>
           </div>
         </div>
@@ -315,7 +434,7 @@ export function SettingsView({
               type={showGeminiKey ? 'text' : 'password'}
               value={settings.geminiApiKey}
               onChange={(e) => onUpdateSettings({ geminiApiKey: e.target.value })}
-              placeholder="AIzaSy..."
+              placeholder="اختیاری: کلید OpenRouter (sk-or-...) یا Gemini (AIza...)"
               className="w-full dir-ltr pl-3 pr-9 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
             />
           </div>
@@ -383,7 +502,6 @@ export function SettingsView({
           </button>
         </div>
 
-        {/* انتقال مستقیم از شیت‌های قبلی */}
         <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
           <div className="text-xs font-bold text-slate-700 dark:text-slate-200">
             انتقال لغات از گوگل شیت قبلی (Import CSV)

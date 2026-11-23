@@ -1,5 +1,5 @@
 import { db, generateId } from '../db/database';
-import { CATEGORY_MAP } from '../config/categories';
+import { getCategorySafe } from '../config/categories';
 import { CategoryId, NotebookEntry, ReviewLog } from '../types';
 
 function triggerDownload(filename: string, content: string, mime: string): void {
@@ -23,7 +23,7 @@ function escapeCsvCell(val: string): string {
 }
 
 export async function exportJsonBackup(): Promise<number> {
-  const entries = await db.entries.filter((e) => e.deletedAt === null).toArray();
+  const entries = await db.entries.filter((e) => !e.deletedAt).toArray();
   const reviewLogs = await db.reviewLogs.toArray();
 
   const payload = {
@@ -65,7 +65,7 @@ export async function importJsonBackup(file: File): Promise<{ added: number; upd
 
       const cleanEntry: NotebookEntry = {
         id,
-        category: (raw.category in CATEGORY_MAP ? raw.category : 'word') as CategoryId,
+        category: getCategorySafe(raw.category).id,
         session: raw.session || '',
         english: String(raw.english).trim(),
         persian: String(raw.persian).trim(),
@@ -114,13 +114,13 @@ export async function importJsonBackup(file: File): Promise<{ added: number; upd
  * خروجی استاندارد CSV سازگار با اپلیکیشن Anki و اکسل (با UTF-8 BOM برای نمایش صحیح فارسی)
  */
 export async function exportAnkiCsv(categoryFilter: CategoryId | 'all' = 'all'): Promise<number> {
-  const all = await db.entries.filter((e) => e.deletedAt === null).toArray();
+  const all = await db.entries.filter((e) => !e.deletedAt).toArray();
   const filtered =
     categoryFilter === 'all' ? all : all.filter((e) => e.category === categoryFilter);
 
   const header = ['Front', 'Back', 'Meta', 'Example', 'Notes', 'Tags'];
   const rows = filtered.map((e) => {
-    const cat = CATEGORY_MAP[e.category];
+    const cat = getCategorySafe(e.category);
     const backHtml = [
       `<b>${e.persian}</b>`,
       e.meta ? `<br><small>${e.meta}</small>` : '',
